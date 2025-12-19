@@ -1,0 +1,13 @@
+# Core dependencies
+pygobject>=3.42.0
+numpy>=1.24.0
+numpy-stl>=3.0.0
+trimesh>=4.0.0
+pillow>=10.0.0
+pycairo>=1.25.0
+shapely>=2.0.0
+
+# Development dependencies
+pytest>=7.0.0
+black>=23.0.0
+mypy>=1.0.0
