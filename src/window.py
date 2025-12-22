@@ -408,6 +408,10 @@ class WatchNumberGeneratorWindow(Adw.ApplicationWindow):
             number_style=number_style,
             number_set=number_set,
             font_desc=params["font"],
+            edge_irregularity=params["edge_irregularity"],
+            surface_roughness=params["surface_roughness"],
+            perspective_stretch=params["perspective_stretch"],
+            erosion=params["erosion"],
         )
 
     def show_toast(self, message: str):

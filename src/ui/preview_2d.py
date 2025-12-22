@@ -19,6 +19,18 @@ from utils.geometry import (
     get_clock_numbers,
     NumberPosition,
 )
+from utils.vector_fit import (
+    calculate_tight_sector_fit,
+    calculate_vector_bounds,
+    VectorBounds,
+)
+from utils.precise_fit import (
+    TrapezoidalSector,
+    calculate_precise_fit,
+    calculate_offset_for_centering,
+    get_sector_bounds_stats,
+)
+from core.distortion_2d import Distortion2D
 
 
 class Preview2DWidget(Gtk.DrawingArea):
@@ -35,6 +47,15 @@ class Preview2DWidget(Gtk.DrawingArea):
         self.number_style = "decimal"
         self.number_set = "all"
         self.font_desc = "Sans Bold 12"
+
+        # Distortion parameters
+        self.edge_irregularity = 0.0
+        self.surface_roughness = 0.0
+        self.perspective_stretch = 0.0
+        self.erosion = 0.0
+
+        # Distortion filter instance
+        self.distortion_filter = Distortion2D(seed=42)
 
         # View transformation
         self.zoom = 1.0
@@ -80,6 +101,10 @@ class Preview2DWidget(Gtk.DrawingArea):
         number_style: str,
         number_set: str,
         font_desc: str,
+        edge_irregularity: float = 0.0,
+        surface_roughness: float = 0.0,
+        perspective_stretch: float = 0.0,
+        erosion: float = 0.0,
     ):
         """Update drawing parameters and refresh."""
         self.outer_radius = outer_radius
@@ -89,6 +114,10 @@ class Preview2DWidget(Gtk.DrawingArea):
         self.number_style = number_style
         self.number_set = number_set
         self.font_desc = font_desc
+        self.edge_irregularity = edge_irregularity
+        self.surface_roughness = surface_roughness
+        self.perspective_stretch = perspective_stretch
+        self.erosion = erosion
         self.queue_draw()
 
     def reset_view(self):
@@ -250,55 +279,233 @@ class Preview2DWidget(Gtk.DrawingArea):
         ctx.restore()
 
     def _draw_fitted_number(self, ctx: cairo.Context, pos: NumberPosition, font_family: str):
-        """Draw number fitted to sector maintaining aspect ratio."""
+        """Draw number fitted to sector using precise vector analysis."""
         ctx.save()
 
         # Setup font
         ctx.select_font_face(font_family, cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
         ctx.set_font_size(100.0)
 
-        # Create text path to get exact bounds
+        # Create text path ONCE at origin
         ctx.move_to(0, 0)
         ctx.text_path(pos.number)
+
+        # Get Cairo path for vector analysis
+        cairo_path = ctx.copy_path()
+
+        # Get extents for quick bounds check
         x1, y1, x2, y2 = ctx.path_extents()
-        ctx.new_path()
 
         if x2 - x1 <= 0 or y2 - y1 <= 0:
             ctx.restore()
             return
 
-        # Calculate path dimensions and center
-        pw = x2 - x1
-        ph = y2 - y1
-        pcx = x1 + pw / 2
-        pcy = y1 + ph / 2
+        # Convert Cairo path to contours for precise vector analysis
+        contours = self._cairo_path_to_contours(cairo_path)
 
-        # Calculate target dimensions
+        # Calculate EXACT vector bounds from actual path points
+        vector_bounds = calculate_vector_bounds(contours)
+
+        if not vector_bounds:
+            ctx.restore()
+            return
+
+        # Clear the current path - we'll redraw it transformed
+        ctx.new_path()
+
+        # Calculate sector dimensions for debug
         text_radius = (pos.inner_radius + pos.outer_radius) / 2
-        arc_width = text_radius * (pos.angle_end - pos.angle_start)
+        angular_span = pos.angle_end - pos.angle_start
+        arc_width = text_radius * angular_span
+        radial_height = pos.outer_radius - pos.inner_radius
 
-        target_w = arc_width * 0.85
-        target_h = pos.max_height * 0.85
+        # First get initial scale estimate from bounding box
+        initial_scale_x, initial_scale_y, fit_center_x, fit_center_y = calculate_tight_sector_fit(
+            vector_bounds,
+            pos.inner_radius,
+            pos.outer_radius,
+            pos.angle_start,
+            pos.angle_end,
+            padding_factor=0.95  # Start with 95% for initial estimate
+        )
 
-        # Calculate scale factors for both dimensions
-        scale_w = target_w / pw
-        scale_h = target_h / ph
+        # Create sector definition for precise testing
+        sector = TrapezoidalSector(
+            inner_radius=pos.inner_radius,
+            outer_radius=pos.outer_radius,
+            angle_start=pos.angle_start,
+            angle_end=pos.angle_end
+        )
 
-        # Use MINIMUM scale to maintain aspect ratio and fit in both dimensions
-        scale = min(scale_w, scale_h)
+        # Use PRECISE algorithm that tests every point
+        print(f"\n{'='*60}")
+        print(f"NUMBER: {pos.number}")
+        print(f"{'='*60}")
+        print(f"Initial scale estimate: {initial_scale_x:.4f}")
 
-        # Apply transformations with UNIFORM scaling
+        precise_scale = calculate_precise_fit(
+            contours=contours,
+            vector_center_x=vector_bounds.center_x,
+            vector_center_y=vector_bounds.center_y,
+            sector=sector,
+            sector_center_x=pos.center_x,
+            sector_center_y=pos.center_y,
+            initial_scale=initial_scale_x,
+            padding_factor=0.95,  # Use 95% of available space
+            max_iterations=50
+        )
+
+        print(f"Precise scale (after verification): {precise_scale:.4f}")
+
+        # Get stats about fit quality
+        offset_x, offset_y = calculate_offset_for_centering(
+            vector_bounds.center_x,
+            vector_bounds.center_y,
+            precise_scale,
+            pos.center_x,
+            pos.center_y
+        )
+
+        stats = get_sector_bounds_stats(contours, precise_scale, offset_x, offset_y, sector)
+        print(f"Fit statistics:")
+        print(f"  Total points: {stats['total_points']}")
+        print(f"  Inside: {stats['inside_points']}, Outside: {stats['outside_points']}")
+        print(f"  All inside: {stats['all_inside']}")
+        print(f"  Radius range: {stats['min_radius']:.2f} - {stats['max_radius']:.2f}")
+        print(f"  Sector range: {stats['sector_inner_radius']:.2f} - {stats['sector_outer_radius']:.2f}")
+
+        scale_x = precise_scale
+        scale_y = precise_scale
+
+        # Calculate the final font size needed (scale the base 100.0)
+        final_font_size = 100.0 * scale_x
+
+        # Apply transformations - position at SECTOR center
         ctx.translate(pos.center_x, pos.center_y)
-        ctx.scale(scale, scale)  # SAME scale for both X and Y
-        ctx.translate(-pcx, -pcy)
+        # Don't apply scale here - we'll use the scaled font size instead
+        # Center using the vector bounds center (from actual glyph geometry)
+        # but also scale the translation
+        ctx.translate(-vector_bounds.center_x * scale_x, -vector_bounds.center_y * scale_y)
 
-        # Draw
+        # DEBUG VISUALIZATION - Draw AFTER transformations
+        ctx.save()
+
+        # Draw vector bounding box in SCALED space
+        ctx.set_source_rgba(0.0, 1.0, 0.0, 0.5)  # Green
+        ctx.set_line_width(0.5)
+        ctx.rectangle(
+            vector_bounds.min_x * scale_x,
+            vector_bounds.min_y * scale_y,
+            vector_bounds.width * scale_x,
+            vector_bounds.height * scale_y
+        )
+        ctx.stroke()
+
+        # Draw all vector points as tiny dots (magenta)
+        ctx.set_source_rgba(1.0, 0.0, 1.0, 0.3)  # Magenta transparent
+        for contour in contours:
+            for x, y in contour:
+                ctx.arc(x * scale_x, y * scale_y, 0.3, 0, 2 * math.pi)
+                ctx.fill()
+
+        # Draw vector center (blue circle)
+        ctx.set_source_rgb(0.0, 0.0, 1.0)  # Blue
+        ctx.arc(vector_bounds.center_x * scale_x, vector_bounds.center_y * scale_y, 2.0, 0, 2 * math.pi)
+        ctx.fill()
+
+        # Draw sector center (red crosshair) - should be at origin after translate
+        ctx.set_source_rgb(1.0, 0.0, 0.0)  # Red
+        ctx.set_line_width(1.0)
+
+        sector_center_x = vector_bounds.center_x * scale_x
+        sector_center_y = vector_bounds.center_y * scale_y
+
+        ctx.move_to(sector_center_x - 5.0, sector_center_y)
+        ctx.line_to(sector_center_x + 5.0, sector_center_y)
+        ctx.move_to(sector_center_x, sector_center_y - 5.0)
+        ctx.line_to(sector_center_x, sector_center_y + 5.0)
+        ctx.stroke()
+
+        # Draw text labels with dimensions
+        label_x = vector_bounds.center_x * scale_x
+        label_y = vector_bounds.min_y * scale_y - 3.0
+
+        ctx.set_source_rgb(0.0, 0.5, 0.0)
+        ctx.set_font_size(2.5)
+
+        label_text = f"{vector_bounds.width * scale_x:.1f}x{vector_bounds.height * scale_y:.1f}"
+        extents = ctx.text_extents(label_text)
+        ctx.move_to(label_x - extents.width/2, label_y)
+        ctx.show_text(label_text)
+
+        ctx.restore()
+
+        # Draw the number with SCALED font size
+        ctx.set_font_size(final_font_size)
         ctx.move_to(0, 0)
         ctx.text_path(pos.number)
         ctx.set_source_rgb(0.0, 0.0, 0.0)
         ctx.fill()
 
         ctx.restore()
+
+    def _cairo_path_to_contours(self, path: cairo.Path) -> List[List[Tuple[float, float]]]:
+        """Convert Cairo path to list of contours for vector analysis."""
+        contours = []
+        current_contour = []
+        current_point = (0.0, 0.0)
+
+        for path_type, points in path:
+            if path_type == cairo.PATH_MOVE_TO:
+                if current_contour:
+                    contours.append(current_contour)
+                    current_contour = []
+                x, y = points
+                current_point = (x, y)
+                current_contour.append((x, y))
+
+            elif path_type == cairo.PATH_LINE_TO:
+                x, y = points
+                current_point = (x, y)
+                current_contour.append((x, y))
+
+            elif path_type == cairo.PATH_CURVE_TO:
+                # Sample the Bezier curve properly - DON'T use control points!
+                x1, y1, x2, y2, x3, y3 = points
+                p0 = current_point
+                p1 = (x1, y1)
+                p2 = (x2, y2)
+                p3 = (x3, y3)
+
+                # Sample curve with 20 points for precision
+                for i in range(1, 21):
+                    t = i / 20.0
+                    # Cubic Bezier formula
+                    x = (
+                        (1-t)**3 * p0[0] +
+                        3*(1-t)**2*t * p1[0] +
+                        3*(1-t)*t**2 * p2[0] +
+                        t**3 * p3[0]
+                    )
+                    y = (
+                        (1-t)**3 * p0[1] +
+                        3*(1-t)**2*t * p1[1] +
+                        3*(1-t)*t**2 * p2[1] +
+                        t**3 * p3[1]
+                    )
+                    current_contour.append((x, y))
+
+                current_point = (x3, y3)
+
+            elif path_type == cairo.PATH_CLOSE_PATH:
+                if current_contour:
+                    contours.append(current_contour)
+                    current_contour = []
+
+        if current_contour:
+            contours.append(current_contour)
+
+        return contours
 
     def _draw_dimensions(self, ctx: cairo.Context):
         """Draw dimension lines and labels."""
