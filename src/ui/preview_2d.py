@@ -2,12 +2,13 @@
 
 import gi
 import math
+import numpy as np
 
 gi.require_version("Gtk", "4.0")
 
 from gi.repository import Gtk, Gdk
 import cairo
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 import sys
 import os
 
@@ -303,7 +304,24 @@ class Preview2DWidget(Gtk.DrawingArea):
         # Convert Cairo path to contours for precise vector analysis
         contours = self._cairo_path_to_contours(cairo_path)
 
-        # Calculate EXACT vector bounds from actual path points
+        # Generate random seed for this number (based on the number text)
+        # This ensures consistent distortion between fitting calculation and rendering
+        distortion_seed = hash(pos.number) % 10000
+
+        # Apply distortions to contours BEFORE fitting calculation
+        # This ensures the binary search accounts for distorted shapes
+        if (self.edge_irregularity > 0 or self.surface_roughness > 0 or
+            self.perspective_stretch > 0 or self.erosion > 0):
+            contours = self._distort_contours(
+                contours,
+                edge_irregularity=self.edge_irregularity,
+                surface_roughness=self.surface_roughness,
+                perspective_stretch=self.perspective_stretch,
+                erosion=self.erosion,
+                random_seed=distortion_seed
+            )
+
+        # Calculate EXACT vector bounds from actual path points (AFTER distortion)
         vector_bounds = calculate_vector_bounds(contours)
 
         if not vector_bounds:
@@ -337,14 +355,14 @@ class Preview2DWidget(Gtk.DrawingArea):
             angle_end=pos.angle_end
         )
 
-        # Use PRECISE algorithm that tests every point
+        # Use PRECISE algorithm that tests every point (with DISTORTED contours)
         print(f"\n{'='*60}")
         print(f"NUMBER: {pos.number}")
         print(f"{'='*60}")
         print(f"Initial scale estimate: {initial_scale_x:.4f}")
 
         precise_scale = calculate_precise_fit(
-            contours=contours,
+            contours=contours,  # Already distorted!
             vector_center_x=vector_bounds.center_x,
             vector_center_y=vector_bounds.center_y,
             sector=sector,
@@ -440,14 +458,231 @@ class Preview2DWidget(Gtk.DrawingArea):
 
         ctx.restore()
 
-        # Draw the number with SCALED font size
+        # Apply wave/curve distortions by manipulating path points
         ctx.set_font_size(final_font_size)
         ctx.move_to(0, 0)
         ctx.text_path(pos.number)
+
+        # Get the path and apply distortions to it (with SAME seed as fitting)
+        if (self.edge_irregularity > 0 or self.surface_roughness > 0 or
+            self.perspective_stretch > 0 or self.erosion > 0):
+
+            distorted_path = self._apply_wave_distortions(
+                ctx.copy_path(),
+                edge_irregularity=self.edge_irregularity,
+                surface_roughness=self.surface_roughness,
+                perspective_stretch=self.perspective_stretch,
+                erosion=self.erosion,
+                scale=scale_x,
+                random_seed=distortion_seed
+            )
+
+            # Clear and redraw with distorted path
+            ctx.new_path()
+            self._render_distorted_path(ctx, distorted_path)
+
         ctx.set_source_rgb(0.0, 0.0, 0.0)
         ctx.fill()
 
         ctx.restore()
+
+    def _distort_contours(
+        self,
+        contours: List[List[Tuple[float, float]]],
+        edge_irregularity: float,
+        surface_roughness: float,
+        perspective_stretch: float,
+        erosion: float,
+        random_seed: int
+    ) -> List[List[Tuple[float, float]]]:
+        """
+        Apply distortions to contours (for fitting calculation).
+        Scale is always 1.0 here since we're working with the base 100pt font.
+        """
+        # Calculate center of all points
+        all_points = [p for contour in contours for p in contour]
+        if not all_points:
+            return contours
+
+        center_x = sum(p[0] for p in all_points) / len(all_points)
+        center_y = sum(p[1] for p in all_points) / len(all_points)
+
+        # Use provided random seed for reproducible distortion
+        random_offset = float(random_seed)
+        scale = 100.0  # Base font size
+
+        distorted_contours = []
+        for contour in contours:
+            distorted_contour = []
+            for x, y in contour:
+                x_dist, y_dist = self._apply_point_distortion(
+                    x, y, center_x, center_y,
+                    edge_irregularity, surface_roughness,
+                    perspective_stretch, erosion,
+                    scale, random_offset
+                )
+                distorted_contour.append((x_dist, y_dist))
+            distorted_contours.append(distorted_contour)
+
+        return distorted_contours
+
+    def _apply_wave_distortions(
+        self,
+        path: cairo.Path,
+        edge_irregularity: float,
+        surface_roughness: float,
+        perspective_stretch: float,
+        erosion: float,
+        scale: float,
+        random_seed: int
+    ) -> List[Tuple[int, Tuple[float, ...]]]:
+        """
+        Apply wave/curve distortions to a Cairo path.
+
+        Returns a list of (path_type, points) tuples representing the distorted path.
+        """
+        distorted = []
+        current_point = (0.0, 0.0)
+
+        # Calculate bounds for center reference
+        all_points = []
+        for path_type, points in path:
+            if path_type == cairo.PATH_MOVE_TO:
+                all_points.append(points)
+            elif path_type == cairo.PATH_LINE_TO:
+                all_points.append(points)
+            elif path_type == cairo.PATH_CURVE_TO:
+                all_points.append((points[4], points[5]))  # End point
+
+        if not all_points:
+            return [(t, p) for t, p in path]
+
+        # Calculate center
+        center_x = sum(p[0] for p in all_points) / len(all_points)
+        center_y = sum(p[1] for p in all_points) / len(all_points)
+
+        # Use provided random seed for reproducible distortion
+        random_offset = float(random_seed)
+
+        for path_type, points in path:
+            if path_type == cairo.PATH_MOVE_TO:
+                x, y = points
+                x_dist, y_dist = self._apply_point_distortion(
+                    x, y, center_x, center_y,
+                    edge_irregularity, surface_roughness,
+                    perspective_stretch, erosion,
+                    scale, random_offset
+                )
+                distorted.append((path_type, (x_dist, y_dist)))
+                current_point = (x_dist, y_dist)
+
+            elif path_type == cairo.PATH_LINE_TO:
+                x, y = points
+                x_dist, y_dist = self._apply_point_distortion(
+                    x, y, center_x, center_y,
+                    edge_irregularity, surface_roughness,
+                    perspective_stretch, erosion,
+                    scale, random_offset
+                )
+                distorted.append((path_type, (x_dist, y_dist)))
+                current_point = (x_dist, y_dist)
+
+            elif path_type == cairo.PATH_CURVE_TO:
+                x1, y1, x2, y2, x3, y3 = points
+                # Distort all three points of the curve
+                x1_d, y1_d = self._apply_point_distortion(
+                    x1, y1, center_x, center_y,
+                    edge_irregularity, surface_roughness,
+                    perspective_stretch, erosion,
+                    scale, random_offset
+                )
+                x2_d, y2_d = self._apply_point_distortion(
+                    x2, y2, center_x, center_y,
+                    edge_irregularity, surface_roughness,
+                    perspective_stretch, erosion,
+                    scale, random_offset
+                )
+                x3_d, y3_d = self._apply_point_distortion(
+                    x3, y3, center_x, center_y,
+                    edge_irregularity, surface_roughness,
+                    perspective_stretch, erosion,
+                    scale, random_offset
+                )
+                distorted.append((path_type, (x1_d, y1_d, x2_d, y2_d, x3_d, y3_d)))
+                current_point = (x3_d, y3_d)
+
+            elif path_type == cairo.PATH_CLOSE_PATH:
+                distorted.append((path_type, points))
+
+        return distorted
+
+    def _apply_point_distortion(
+        self,
+        x: float,
+        y: float,
+        center_x: float,
+        center_y: float,
+        edge_irregularity: float,
+        surface_roughness: float,
+        perspective_stretch: float,
+        erosion: float,
+        scale: float,
+        random_offset: float
+    ) -> Tuple[float, float]:
+        """Apply distortion to a single point."""
+        x_out = x
+        y_out = y
+
+        # 1. Wave distortion (surface_roughness) - creates actual curves
+        if surface_roughness > 0:
+            # Horizontal wave based on Y position
+            wave_freq = 3.0  # Number of waves
+            wave_h = math.sin((y / scale) * wave_freq + random_offset) * surface_roughness * scale * 0.15
+            x_out += wave_h
+
+            # Vertical wave based on X position
+            wave_v = math.sin((x / scale) * wave_freq * 1.5 + random_offset + 1.5) * surface_roughness * scale * 0.1
+            y_out += wave_v
+
+        # 2. Edge irregularity - random noise
+        if edge_irregularity > 0:
+            noise_scale = edge_irregularity * scale * 0.08
+            x_out += (np.random.random() - 0.5) * noise_scale
+            y_out += (np.random.random() - 0.5) * noise_scale
+
+        # 3. Perspective stretch - radial bulge
+        if perspective_stretch > 0:
+            dx = x_out - center_x
+            dy = y_out - center_y
+            dist = math.sqrt(dx*dx + dy*dy)
+
+            if dist > 0:
+                # Bulge effect
+                bulge_factor = 1.0 + (perspective_stretch * 0.15 * (dist / scale))
+                x_out = center_x + dx * bulge_factor
+                y_out = center_y + dy * bulge_factor
+
+        # 4. Erosion - shrink towards center
+        if erosion > 0:
+            dx = x_out - center_x
+            dy = y_out - center_y
+            shrink = 1.0 - erosion * 0.08
+            x_out = center_x + dx * shrink
+            y_out = center_y + dy * shrink
+
+        return x_out, y_out
+
+    def _render_distorted_path(self, ctx: cairo.Context, distorted_path: List[Tuple[int, Tuple[float, ...]]]):
+        """Render a distorted path to the Cairo context."""
+        for path_type, points in distorted_path:
+            if path_type == cairo.PATH_MOVE_TO:
+                ctx.move_to(*points)
+            elif path_type == cairo.PATH_LINE_TO:
+                ctx.line_to(*points)
+            elif path_type == cairo.PATH_CURVE_TO:
+                ctx.curve_to(*points)
+            elif path_type == cairo.PATH_CLOSE_PATH:
+                ctx.close_path()
 
     def _cairo_path_to_contours(self, path: cairo.Path) -> List[List[Tuple[float, float]]]:
         """Convert Cairo path to list of contours for vector analysis."""
@@ -477,9 +712,11 @@ class Preview2DWidget(Gtk.DrawingArea):
                 p2 = (x2, y2)
                 p3 = (x3, y3)
 
-                # Sample curve with 20 points for precision
-                for i in range(1, 21):
-                    t = i / 20.0
+                # Sample curve with fewer points (5) for mesh generation performance
+                # This reduces triangle count significantly in 3D viewer
+                num_samples = 5
+                for i in range(1, num_samples + 1):
+                    t = i / num_samples
                     # Cubic Bezier formula
                     x = (
                         (1-t)**3 * p0[0] +
@@ -649,3 +886,179 @@ class Preview2DWidget(Gtk.DrawingArea):
     def _on_drag_end(self, gesture, offset_x, offset_y):
         """Handle drag end."""
         self.dragging = False
+
+    def generate_mesh_data(self) -> List[dict]:
+        """
+        Generate mesh data for all numbers with current parameters and distortions.
+
+        Returns:
+            List of dicts with keys: contours, center_x, center_y, number, scale
+        """
+        mesh_data = []
+
+        # Get numbers
+        style = "roman" if self.number_style == "roman" else "decimal"
+        num_set = "cardinals" if self.number_set == "cardinals" else "all"
+        numbers = get_clock_numbers(style, num_set)
+
+        # Calculate positions
+        positions = calculate_number_positions(
+            self.outer_radius,
+            self.inner_radius,
+            self.vertical_margin,
+            self.horizontal_margin,
+            numbers,
+        )
+
+        # Parse font
+        font_family = "Sans"
+        parts = self.font_desc.split()
+        if len(parts) >= 2:
+            font_family = " ".join(parts[:-1])
+        else:
+            font_family = self.font_desc
+
+        # Create temporary Cairo surface for path extraction
+        temp_surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 100, 100)
+        ctx = cairo.Context(temp_surface)
+
+        for pos in positions:
+            # Setup font
+            ctx.select_font_face(font_family, cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+            ctx.set_font_size(100.0)
+
+            # Create text path at origin
+            ctx.new_path()
+            ctx.move_to(0, 0)
+            ctx.text_path(pos.number)
+
+            # Get Cairo path
+            cairo_path = ctx.copy_path()
+
+            # Convert to contours
+            contours = self._cairo_path_to_contours(cairo_path)
+
+            if not contours:
+                continue
+
+            # Generate distortion seed for this number
+            distortion_seed = hash(pos.number) % 10000
+
+            # Apply distortions to contours (same as in rendering)
+            if (self.edge_irregularity > 0 or self.surface_roughness > 0 or
+                self.perspective_stretch > 0 or self.erosion > 0):
+                contours = self._distort_contours(
+                    contours,
+                    edge_irregularity=self.edge_irregularity,
+                    surface_roughness=self.surface_roughness,
+                    perspective_stretch=self.perspective_stretch,
+                    erosion=self.erosion,
+                    random_seed=distortion_seed
+                )
+
+            # Calculate vector bounds
+            vector_bounds = calculate_vector_bounds(contours)
+
+            if not vector_bounds:
+                continue
+
+            # Calculate initial scale
+            initial_scale_x, initial_scale_y, fit_center_x, fit_center_y = calculate_tight_sector_fit(
+                vector_bounds,
+                pos.inner_radius,
+                pos.outer_radius,
+                pos.angle_start,
+                pos.angle_end,
+                padding_factor=0.95
+            )
+
+            # Create sector for precise fitting
+            sector = TrapezoidalSector(
+                inner_radius=pos.inner_radius,
+                outer_radius=pos.outer_radius,
+                angle_start=pos.angle_start,
+                angle_end=pos.angle_end
+            )
+
+            # Calculate precise scale
+            precise_scale = calculate_precise_fit(
+                contours=contours,
+                vector_center_x=vector_bounds.center_x,
+                vector_center_y=vector_bounds.center_y,
+                sector=sector,
+                sector_center_x=pos.center_x,
+                sector_center_y=pos.center_y,
+                initial_scale=initial_scale_x,
+                padding_factor=0.95,
+                max_iterations=50
+            )
+
+            # Scale and translate contours to final position
+            scaled_contours = []
+            for contour in contours:
+                scaled_contour = []
+                for x, y in contour:
+                    # Scale
+                    x_scaled = x * precise_scale
+                    y_scaled = y * precise_scale
+                    # Translate to sector center, offset by vector center
+                    x_final = pos.center_x + x_scaled - (vector_bounds.center_x * precise_scale)
+                    y_final = pos.center_y + y_scaled - (vector_bounds.center_y * precise_scale)
+                    scaled_contour.append((x_final, y_final))
+                scaled_contours.append(scaled_contour)
+
+            # Calculate sector box corners for debug visualization
+            sector_box_corners = sector.get_corners()
+
+            mesh_data.append({
+                "number": pos.number,
+                "contours": scaled_contours,  # Use full contours to preserve exact shape
+                "center_x": pos.center_x,
+                "center_y": pos.center_y,
+                "scale": precise_scale,
+                "angle": (pos.angle_start + pos.angle_end) / 2,
+                "sector_box": {
+                    "corners": sector_box_corners,
+                    "inner_radius": pos.inner_radius,
+                    "outer_radius": pos.outer_radius,
+                    "angle_start": pos.angle_start,
+                    "angle_end": pos.angle_end
+                }
+            })
+
+        return mesh_data
+
+    def _simplify_contours_for_mesh(self, contours: List[List[Tuple[float, float]]]) -> List[List[Tuple[float, float]]]:
+        """
+        Simplify contours by reducing point count while preserving shape.
+        Uses Douglas-Peucker-like algorithm.
+
+        Args:
+            contours: Original contours with many points
+
+        Returns:
+            Simplified contours with fewer points
+        """
+        simplified = []
+
+        for contour in contours:
+            if len(contour) < 10:
+                # Too few points, keep as is
+                simplified.append(contour)
+                continue
+
+            # Simple decimation: keep every Nth point
+            # For 3D mesh we don't need as much detail as 2D rendering
+            step = max(1, len(contour) // 30)  # Target ~30 points per contour
+
+            simplified_contour = []
+            for i in range(0, len(contour), step):
+                simplified_contour.append(contour[i])
+
+            # Always include last point to close contour properly
+            if simplified_contour[-1] != contour[-1]:
+                simplified_contour.append(contour[-1])
+
+            simplified.append(simplified_contour)
+
+        return simplified

@@ -8,6 +8,10 @@ gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, GLib
 from typing import Optional
 from ui.preview_2d import Preview2DWidget
+from core.mesh_generator import MeshGenerator
+
+# Use Cairo-based 3D viewer (OpenGL in GTK4 requires modern shader-based approach)
+from ui.preview_3d import Preview3DWidget
 
 
 class WatchNumberGeneratorWindow(Adw.ApplicationWindow):
@@ -15,6 +19,10 @@ class WatchNumberGeneratorWindow(Adw.ApplicationWindow):
 
     def __init__(self, application: Adw.Application):
         super().__init__(application=application)
+
+        # Mesh generator
+        self.mesh_generator = MeshGenerator()
+        self.generated_mesh = None
 
         # Window properties
         self.set_title("Watch Number Generator")
@@ -79,13 +87,26 @@ class WatchNumberGeneratorWindow(Adw.ApplicationWindow):
         distortion_group = self._create_distortion_group()
         controls_box.append(distortion_group)
 
-        # Export button
-        export_button = Gtk.Button(label="Export STL Files")
-        export_button.add_css_class("suggested-action")
-        export_button.add_css_class("pill")
-        export_button.set_margin_top(12)
-        export_button.connect("clicked", self._on_export_clicked)
-        controls_box.append(export_button)
+        # Action buttons
+        buttons_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        buttons_box.set_spacing(8)
+        buttons_box.set_margin_top(12)
+
+        # Generate 3D Mesh button
+        self.generate_mesh_button = Gtk.Button(label="Generate 3D Mesh")
+        self.generate_mesh_button.add_css_class("suggested-action")
+        self.generate_mesh_button.add_css_class("pill")
+        self.generate_mesh_button.connect("clicked", self._on_generate_mesh_clicked)
+        buttons_box.append(self.generate_mesh_button)
+
+        # Export button (initially disabled)
+        self.export_button = Gtk.Button(label="Export...")
+        self.export_button.add_css_class("pill")
+        self.export_button.set_sensitive(False)
+        self.export_button.connect("clicked", self._on_export_clicked)
+        buttons_box.append(self.export_button)
+
+        controls_box.append(buttons_box)
 
         scrolled.set_child(controls_box)
         sidebar.append(scrolled)
@@ -103,7 +124,7 @@ class WatchNumberGeneratorWindow(Adw.ApplicationWindow):
         outer_row.set_title("Outer Radius")
         outer_row.set_subtitle("Maximum dial diameter")
         outer_row.set_adjustment(
-            Gtk.Adjustment(value=50.0, lower=10.0, upper=500.0, step_increment=1.0)
+            Gtk.Adjustment(value=100.0, lower=10.0, upper=500.0, step_increment=1.0)
         )
         outer_row.set_digits(1)
         outer_row.connect("changed", self._on_dimensions_changed)
@@ -115,7 +136,7 @@ class WatchNumberGeneratorWindow(Adw.ApplicationWindow):
         inner_row.set_title("Inner Radius")
         inner_row.set_subtitle("Number placement boundary")
         inner_row.set_adjustment(
-            Gtk.Adjustment(value=35.0, lower=5.0, upper=400.0, step_increment=1.0)
+            Gtk.Adjustment(value=70.0, lower=5.0, upper=400.0, step_increment=1.0)
         )
         inner_row.set_digits(1)
         inner_row.connect("changed", self._on_dimensions_changed)
@@ -135,7 +156,7 @@ class WatchNumberGeneratorWindow(Adw.ApplicationWindow):
         number_system_row.set_model(
             Gtk.StringList.new(["Decimal (1-12)", "Roman (I-XII)"])
         )
-        number_system_row.set_selected(0)
+        number_system_row.set_selected(1)
         number_system_row.connect("notify::selected", self._on_style_changed)
         self.number_system_row = number_system_row
         group.add(number_system_row)
@@ -158,6 +179,14 @@ class WatchNumberGeneratorWindow(Adw.ApplicationWindow):
         font_button = Gtk.FontButton()
         font_button.set_use_font(True)
         font_button.set_valign(Gtk.Align.CENTER)
+        # Try to set C059 Roman or fallback to Serif
+        try:
+            font_button.set_font("C059 Roman 12")
+        except:
+            try:
+                font_button.set_font("Serif 12")
+            except:
+                pass  # Use system default if neither available
         font_button.connect("font-set", self._on_font_changed)
         font_row.add_suffix(font_button)
         self.font_button = font_button
@@ -175,7 +204,7 @@ class WatchNumberGeneratorWindow(Adw.ApplicationWindow):
         depth_row.set_title("Extrusion Depth")
         depth_row.set_subtitle("Thickness of numbers (mm)")
         depth_row.set_adjustment(
-            Gtk.Adjustment(value=2.0, lower=0.5, upper=20.0, step_increment=0.5)
+            Gtk.Adjustment(value=2.5, lower=0.5, upper=20.0, step_increment=0.5)
         )
         depth_row.set_digits(1)
         depth_row.connect("changed", self._on_mesh_params_changed)
@@ -187,7 +216,7 @@ class WatchNumberGeneratorWindow(Adw.ApplicationWindow):
         vmargin_row.set_title("Vertical Margin")
         vmargin_row.set_subtitle("Top/bottom padding (mm)")
         vmargin_row.set_adjustment(
-            Gtk.Adjustment(value=1.0, lower=0.0, upper=20.0, step_increment=0.5)
+            Gtk.Adjustment(value=0.0, lower=0.0, upper=20.0, step_increment=0.5)
         )
         vmargin_row.set_digits(1)
         vmargin_row.connect("changed", self._on_mesh_params_changed)
@@ -199,7 +228,7 @@ class WatchNumberGeneratorWindow(Adw.ApplicationWindow):
         hmargin_row.set_title("Horizontal Margin")
         hmargin_row.set_subtitle("Side padding (mm)")
         hmargin_row.set_adjustment(
-            Gtk.Adjustment(value=1.0, lower=0.0, upper=20.0, step_increment=0.5)
+            Gtk.Adjustment(value=0.0, lower=0.0, upper=20.0, step_increment=0.5)
         )
         hmargin_row.set_digits(1)
         hmargin_row.connect("changed", self._on_mesh_params_changed)
@@ -306,40 +335,14 @@ class WatchNumberGeneratorWindow(Adw.ApplicationWindow):
         content.append(tab_bar)
 
         # 2D Preview tab
-        preview_2d_widget = Preview2DWidget()
-        self.preview_2d_widget = preview_2d_widget
-        tab_view.append(preview_2d_widget).set_title("2D Preview")
+        self.preview_2d_widget = Preview2DWidget()
+        tab_view.append(self.preview_2d_widget).set_title("2D Preview")
 
-        # 3D Preview tab (placeholder)
-        preview_3d_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        preview_3d_box.set_hexpand(True)
-        preview_3d_box.set_vexpand(True)
-        preview_3d_box.set_spacing(12)
-        preview_3d_box.set_margin_top(48)
-        preview_3d_box.set_margin_bottom(48)
-        preview_3d_box.set_margin_start(48)
-        preview_3d_box.set_margin_end(48)
-        preview_3d_box.set_valign(Gtk.Align.CENTER)
-        preview_3d_box.set_halign(Gtk.Align.CENTER)
-
-        # Title
-        title_label = Gtk.Label(label="3D Preview")
-        title_label.add_css_class("title-1")
-        preview_3d_box.append(title_label)
-
-        # Info message
-        info_label = Gtk.Label()
-        info_label.set_markup(
-            "<span size='large'>Coming Soon</span>\n\n"
-            "3D mesh preview will be available in a future update.\n\n"
-            "<b>Note:</b> Distortion filters are applied only during export.\n"
-            "Use the 2D preview to verify number positioning and sizing."
-        )
-        info_label.set_justify(Gtk.Justification.CENTER)
-        info_label.add_css_class("dim-label")
-        preview_3d_box.append(info_label)
-
-        tab_view.append(preview_3d_box).set_title("3D Preview")
+        # 3D Preview tab
+        self.preview_3d_widget = Preview3DWidget()
+        self.preview_3d_widget.set_hexpand(True)
+        self.preview_3d_widget.set_vexpand(True)
+        tab_view.append(self.preview_3d_widget).set_title("3D Preview")
 
         self.tab_view = tab_view
 
@@ -386,9 +389,85 @@ class WatchNumberGeneratorWindow(Adw.ApplicationWindow):
         if self.distortion_enable_row.get_active():
             self._update_preview()
 
+    def _on_generate_mesh_clicked(self, widget):
+        """Handle Generate 3D Mesh button click."""
+        # Show loading state
+        self.generate_mesh_button.set_sensitive(False)
+        self.generate_mesh_button.set_label("Generating...")
+
+        # Generate mesh in background (simplified for now)
+        GLib.timeout_add(100, self._complete_mesh_generation)
+
+    def _complete_mesh_generation(self):
+        """Complete mesh generation and enable export."""
+        try:
+            # Get mesh data from 2D preview (with distortions applied)
+            numbers_data = self.preview_2d_widget.generate_mesh_data()
+
+            if not numbers_data:
+                self.show_toast("Error: No numbers to generate mesh from")
+                self.generate_mesh_button.set_label("Generate 3D Mesh")
+                self.generate_mesh_button.set_sensitive(True)
+                return False
+
+            # Get extrusion depth
+            params = self.get_parameters()
+            extrusion_depth = params["extrusion_depth"]
+
+            # Generate 3D mesh using MeshGenerator
+            print(f"Generating mesh for {len(numbers_data)} numbers with depth {extrusion_depth}mm")
+            self.generated_mesh = self.mesh_generator.create_numbers_mesh(
+                numbers_data,
+                extrusion_depth
+            )
+
+            # Get mesh stats
+            min_bounds, max_bounds = self.mesh_generator.get_mesh_bounds(self.generated_mesh)
+            dimensions = self.mesh_generator.get_mesh_dimensions(self.generated_mesh)
+
+            print(f"Mesh generated successfully!")
+            print(f"  Bounds: {min_bounds} to {max_bounds}")
+            print(f"  Dimensions: {dimensions[0]:.2f} x {dimensions[1]:.2f} x {dimensions[2]:.2f} mm")
+            print(f"  Triangles: {len(self.generated_mesh.vectors)}")
+
+            # Update 3D preview widget with mesh data
+            mesh_data = {
+                "generated": True,
+                "timestamp": GLib.DateTime.new_now_local().format("%H:%M:%S"),
+                "mesh": self.generated_mesh,
+                "numbers_count": len(numbers_data),
+                "dimensions": dimensions,
+                "triangles": len(self.generated_mesh.vectors),
+                "numbers_data": numbers_data  # For debug visualizations
+            }
+            self.preview_3d_widget.set_mesh(mesh_data)
+
+            # Update button states
+            self.generate_mesh_button.set_label("Regenerate 3D Mesh")
+            self.generate_mesh_button.set_sensitive(True)
+            self.export_button.set_sensitive(True)
+            self.export_button.add_css_class("suggested-action")
+
+            # Switch to 3D Preview tab
+            preview_3d_page = self.tab_view.get_nth_page(1)
+            self.tab_view.set_selected_page(preview_3d_page)
+
+            self.show_toast(f"3D mesh generated! {len(numbers_data)} numbers, {len(self.generated_mesh.vectors)} triangles")
+
+        except Exception as e:
+            print(f"Error generating mesh: {e}")
+            import traceback
+            traceback.print_exc()
+            self.show_toast(f"Error generating mesh: {str(e)}")
+            self.generate_mesh_button.set_label("Generate 3D Mesh")
+            self.generate_mesh_button.set_sensitive(True)
+
+        return False  # Don't repeat
+
     def _on_export_clicked(self, widget):
-        """Handle export button click."""
-        self.show_toast("Export functionality coming soon!")
+        """Handle export button click - show export dialog."""
+        # TODO: Create and show export dialog with options
+        self.show_toast("Export dialog coming soon!")
 
     def _update_preview(self):
         """Update the preview display."""

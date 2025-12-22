@@ -13,6 +13,40 @@ class TrapezoidalSector:
     angle_start: float  # radians
     angle_end: float    # radians
 
+    def get_corners(self) -> List[Tuple[float, float]]:
+        """
+        Get the four corners of the trapezoidal sector in Cartesian coordinates.
+
+        Returns corners in clockwise order:
+        - Inner radius at start angle
+        - Outer radius at start angle
+        - Outer radius at end angle
+        - Inner radius at end angle
+        """
+        corners = []
+
+        # Corner 1: Inner radius at start angle
+        x1 = self.inner_radius * math.sin(self.angle_start)
+        y1 = -self.inner_radius * math.cos(self.angle_start)
+        corners.append((x1, y1))
+
+        # Corner 2: Outer radius at start angle
+        x2 = self.outer_radius * math.sin(self.angle_start)
+        y2 = -self.outer_radius * math.cos(self.angle_start)
+        corners.append((x2, y2))
+
+        # Corner 3: Outer radius at end angle
+        x3 = self.outer_radius * math.sin(self.angle_end)
+        y3 = -self.outer_radius * math.cos(self.angle_end)
+        corners.append((x3, y3))
+
+        # Corner 4: Inner radius at end angle
+        x4 = self.inner_radius * math.sin(self.angle_end)
+        y4 = -self.inner_radius * math.cos(self.angle_end)
+        corners.append((x4, y4))
+
+        return corners
+
 
 def point_in_sector(x: float, y: float, sector: TrapezoidalSector) -> bool:
     """
