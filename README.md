@@ -48,6 +48,22 @@ sudo apt install libgtk-4-dev libadwaita-1-dev python3-gi
 sudo apt install libcairo2-dev python3-cairo
 ```
 
+### macOS
+
+```bash
+# Install GTK4 via Homebrew
+brew install gtk4 libadwaita cairo
+
+# Create virtual environment and install Python packages
+python3 -m venv .venv
+source .venv/bin/activate
+export PKG_CONFIG_PATH="/opt/homebrew/lib/pkgconfig:$PKG_CONFIG_PATH"
+pip install pycairo PyGObject
+pip install -r requirements.txt
+```
+
+**See [MACOS_SETUP.md](MACOS_SETUP.md) for detailed macOS installation and troubleshooting.**
+
 ### Python Dependencies
 
 ```bash
