@@ -31,7 +31,8 @@ from utils.precise_fit import (
     calculate_offset_for_centering,
     get_sector_bounds_stats,
 )
-from core.distortion_2d import Distortion2D
+# Distortion imports REMOVED during refactoring
+# from core.distortion_2d import Distortion2D
 
 
 class Preview2DWidget(Gtk.DrawingArea):
@@ -49,14 +50,8 @@ class Preview2DWidget(Gtk.DrawingArea):
         self.number_set = "all"
         self.font_desc = "Sans Bold 12"
 
-        # Distortion parameters
-        self.edge_irregularity = 0.0
-        self.surface_roughness = 0.0
-        self.perspective_stretch = 0.0
-        self.erosion = 0.0
-
-        # Distortion filter instance
-        self.distortion_filter = Distortion2D(seed=42)
+        # Distortion parameters REMOVED during refactoring
+        # TODO: Re-implement with preset-based approach
 
         # View transformation
         self.zoom = 1.0
@@ -102,10 +97,6 @@ class Preview2DWidget(Gtk.DrawingArea):
         number_style: str,
         number_set: str,
         font_desc: str,
-        edge_irregularity: float = 0.0,
-        surface_roughness: float = 0.0,
-        perspective_stretch: float = 0.0,
-        erosion: float = 0.0,
     ):
         """Update drawing parameters and refresh."""
         self.outer_radius = outer_radius
@@ -115,10 +106,7 @@ class Preview2DWidget(Gtk.DrawingArea):
         self.number_style = number_style
         self.number_set = number_set
         self.font_desc = font_desc
-        self.edge_irregularity = edge_irregularity
-        self.surface_roughness = surface_roughness
-        self.perspective_stretch = perspective_stretch
-        self.erosion = erosion
+        # Distortion parameters removed during refactoring
         self.queue_draw()
 
     def reset_view(self):
@@ -308,18 +296,8 @@ class Preview2DWidget(Gtk.DrawingArea):
         # This ensures consistent distortion between fitting calculation and rendering
         distortion_seed = hash(pos.number) % 10000
 
-        # Apply distortions to contours BEFORE fitting calculation
-        # This ensures the binary search accounts for distorted shapes
-        if (self.edge_irregularity > 0 or self.surface_roughness > 0 or
-            self.perspective_stretch > 0 or self.erosion > 0):
-            contours = self._distort_contours(
-                contours,
-                edge_irregularity=self.edge_irregularity,
-                surface_roughness=self.surface_roughness,
-                perspective_stretch=self.perspective_stretch,
-                erosion=self.erosion,
-                random_seed=distortion_seed
-            )
+        # Distortion logic REMOVED during refactoring
+        # TODO: Re-implement with preset-based approach if needed
 
         # Calculate EXACT vector bounds from actual path points (AFTER distortion)
         vector_bounds = calculate_vector_bounds(contours)
@@ -463,16 +441,15 @@ class Preview2DWidget(Gtk.DrawingArea):
         ctx.move_to(0, 0)
         ctx.text_path(pos.number)
 
-        # Get the path and apply distortions to it (with SAME seed as fitting)
-        if (self.edge_irregularity > 0 or self.surface_roughness > 0 or
-            self.perspective_stretch > 0 or self.erosion > 0):
-
+        # Distortion logic REMOVED during refactoring
+        # Path rendering is now clean without distortions
+        if False:  # Disabled
             distorted_path = self._apply_wave_distortions(
                 ctx.copy_path(),
-                edge_irregularity=self.edge_irregularity,
-                surface_roughness=self.surface_roughness,
-                perspective_stretch=self.perspective_stretch,
-                erosion=self.erosion,
+                edge_irregularity=0.0,
+                surface_roughness=0.0,
+                perspective_stretch=0.0,
+                erosion=0.0,
                 scale=scale_x,
                 random_seed=distortion_seed
             )
@@ -941,20 +918,8 @@ class Preview2DWidget(Gtk.DrawingArea):
             if not contours:
                 continue
 
-            # Generate distortion seed for this number
-            distortion_seed = hash(pos.number) % 10000
-
-            # Apply distortions to contours (same as in rendering)
-            if (self.edge_irregularity > 0 or self.surface_roughness > 0 or
-                self.perspective_stretch > 0 or self.erosion > 0):
-                contours = self._distort_contours(
-                    contours,
-                    edge_irregularity=self.edge_irregularity,
-                    surface_roughness=self.surface_roughness,
-                    perspective_stretch=self.perspective_stretch,
-                    erosion=self.erosion,
-                    random_seed=distortion_seed
-                )
+            # Distortion logic REMOVED during refactoring
+            # TODO: Re-implement with preset-based approach if needed
 
             # Calculate vector bounds
             vector_bounds = calculate_vector_bounds(contours)

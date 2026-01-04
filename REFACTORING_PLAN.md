@@ -298,6 +298,91 @@ class SubtleDistortion:
 
 ---
 
+## 🗂️ FASE 2.5: Export Dialog Implementation
+
+**Obiettivo**: Implementare dialog export professionale con opzioni e validazione.
+
+#### Task 2.4: Export Dialog UI e Funzionalità
+**File**: Nuovo `src/ui/export_dialog.py`
+
+**Features**:
+```python
+class ExportDialog(Adw.Dialog):
+    """
+    Dialog per export mesh con opzioni:
+    - Formato: STL singoli, STL combinato, o entrambi
+    - Cartella destinazione (file chooser)
+    - Nome base file (es. "watch_numbers")
+    - Include preview PNG (checkbox)
+    - Include README.txt (checkbox)
+    - Validazione mesh prima export
+    """
+```
+
+**UI Design**:
+```
+┌─────────────────────────────────────────┐
+│ Export Watch Numbers                  × │
+├─────────────────────────────────────────┤
+│                                         │
+│ Export Format:                          │
+│ ○ Individual STL files (1.stl, 2.stl...)│
+│ ○ Combined STL file (all numbers)       │
+│ ● Both                                  │
+│                                         │
+│ Destination Folder:                     │
+│ [/Users/name/Downloads    ] [Browse...] │
+│                                         │
+│ Base Filename:                          │
+│ [watch_numbers_________]                │
+│                                         │
+│ ☑ Include 2D preview image (PNG)       │
+│ ☑ Include README with parameters       │
+│                                         │
+│ Mesh Info:                              │
+│ • Numbers: 12                           │
+│ • Triangles: 3,024                      │
+│ • Size: 193.9×193.9×2.5mm              │
+│ • Valid: ✓ Manifold                    │
+│                                         │
+│         [Cancel]  [Export]              │
+└─────────────────────────────────────────┘
+```
+
+**Modifiche a `window.py`**:
+```python
+def _on_export_clicked(self, widget):
+    """Handle export button click."""
+    if not self.generated_mesh:
+        self.show_toast("Generate 3D mesh first!")
+        return
+
+    # Show export dialog
+    from ui.export_dialog import ExportDialog
+
+    dialog = ExportDialog(
+        transient_for=self,
+        mesh=self.generated_mesh,
+        parameters=self.get_parameters(),
+        preview_widget=self.preview_2d_widget
+    )
+    dialog.present()
+```
+
+**Export Process**:
+1. Utente clicca "Export..."
+2. Dialog si apre con opzioni precompilate
+3. Utente sceglie cartella e opzioni
+4. Click "Export" → Progress bar appare
+5. Validazione mesh (is_manifold, is_watertight)
+6. Se valida: export files
+7. Se non valida: mostra warning + opzione "Repair and Export"
+8. Genera README.txt con parametri usati
+9. Opzionale: salva preview.png
+10. Toast "Exported to /path/file.zip"
+
+---
+
 ## 📊 Cleanup Generale
 
 ### Task 4.1: Rimuovere Codice Morto
@@ -344,6 +429,16 @@ logger.error(f"Mesh validation failed: {error}")
 3. ✅ **Task 2.3**: Aggiungi test stampabilità
 
 **Risultato atteso**: Mesh sempre valide e stampabili.
+
+### Sprint 2.5: EXPORT DIALOG (0.5 giorni)
+1. ⏳ **Task 2.4**: Implementa Export Dialog
+   - Dialog con preview mesh
+   - Opzioni: formato (STL singoli/combinato), nome file, cartella destinazione
+   - Progress bar per export
+   - Validazione mesh prima export
+   - Generazione README.txt con parametri
+
+**Risultato atteso**: Export funzionale con UI professionale.
 
 ### Sprint 3: CLEANUP (0.5 giorni)
 1. ✅ **Task 4.1**: Rimuovi codice morto

@@ -28,8 +28,9 @@ class Preview3DWidget(Gtk.DrawingArea):
 
         # Debug visualization flags
         self.show_grid = True
-        self.show_debug_boxes = True
+        self.show_debug_boxes = False  # DISABLED: mesh is already positioned correctly
         self.show_axes = True
+        self.show_dimensions = True  # Show dimension lines for radii
 
         # Mouse interaction
         self.dragging = False
@@ -48,6 +49,7 @@ class Preview3DWidget(Gtk.DrawingArea):
         self._cached_height = None
         self._cached_show_grid = None
         self._cached_show_debug = None
+        self._cached_show_dimensions = None
 
         # Redraw throttling
         self._redraw_timeout_id = None
@@ -121,7 +123,8 @@ class Preview3DWidget(Gtk.DrawingArea):
                 self._cached_width == width and
                 self._cached_height == height and
                 self._cached_show_grid == self.show_grid and
-                self._cached_show_debug == self.show_debug_boxes
+                self._cached_show_debug == self.show_debug_boxes and
+                self._cached_show_dimensions == self.show_dimensions
             )
 
             if cache_valid:
@@ -149,6 +152,7 @@ class Preview3DWidget(Gtk.DrawingArea):
                 self._cached_height = height
                 self._cached_show_grid = self.show_grid
                 self._cached_show_debug = self.show_debug_boxes
+                self._cached_show_dimensions = self.show_dimensions
 
                 # Blit to screen
                 ctx.set_source_surface(self._cached_surface, 0, 0)
@@ -193,9 +197,13 @@ class Preview3DWidget(Gtk.DrawingArea):
         if self.show_axes:
             self._draw_3d_axes(ctx, width, height, view_size, R, cx, cy)
 
-        # Draw debug boxes for number sectors
-        if self.show_debug_boxes and "numbers_data" in self.mesh_data:
-            self._draw_debug_boxes(ctx, width, height, view_size, R, cx, cy)
+        # Draw dimension lines for radii
+        if self.show_dimensions and "parameters" in self.mesh_data:
+            self._draw_3d_dimensions(ctx, width, height, view_size, R, cx, cy)
+
+        # Debug boxes DISABLED - mesh is already correctly positioned by UnifiedMeshPipeline
+        # if self.show_debug_boxes and "numbers_data" in self.mesh_data:
+        #     self._draw_debug_boxes(ctx, width, height, view_size, R, cx, cy)
 
         # Draw mesh triangles with two-sided lighting and wireframe
         camera_dir = np.array([0.0, 0.0, 1.0])  # Camera looking towards +Z
@@ -369,6 +377,143 @@ class Preview3DWidget(Gtk.DrawingArea):
         ctx.move_to(cx + p0[0] * view_size, cy - p0[1] * view_size)
         ctx.line_to(cx + p1[0] * view_size, cy - p1[1] * view_size)
         ctx.stroke()
+
+    def _draw_3d_dimensions(self, ctx: cairo.Context, width, height, view_size, R, cx, cy):
+        """Draw dimension lines for outer and inner radii in 3D."""
+        params = self.mesh_data["parameters"]
+        outer_radius = params.get("outer_radius", 50.0)
+        inner_radius = params.get("inner_radius", 35.0)
+
+        # Get mesh bounds for normalization
+        mesh = self.mesh_data["mesh"]
+        all_points = mesh.vectors.reshape(-1, 3)
+        center = np.mean(all_points, axis=0)
+        extents = np.max(all_points, axis=0) - np.min(all_points, axis=0)
+        max_extent = max(extents)
+
+        # Normalize radii to match mesh coordinate system
+        outer_norm = outer_radius / max_extent
+        inner_norm = inner_radius / max_extent
+
+        # Draw outer radius dimension (horizontal line at 0°)
+        self._draw_3d_dimension_line(
+            ctx, 0.0, 0.0, outer_norm, 0.0,
+            f"R{outer_radius:.1f}mm",
+            view_size, R, cx, cy
+        )
+
+        # Draw inner radius dimension (vertical line at 90°)
+        self._draw_3d_dimension_line(
+            ctx, 0.0, 0.0, 0.0, -inner_norm,
+            f"R{inner_radius:.1f}mm",
+            view_size, R, cx, cy
+        )
+
+        # Draw radius circles
+        ctx.set_source_rgba(0.4, 0.6, 1.0, 0.5)
+        ctx.set_line_width(1.5)
+
+        # Outer circle
+        self._draw_3d_circle(ctx, outer_norm, view_size, R, cx, cy)
+
+        # Inner circle
+        ctx.set_source_rgba(0.3, 1.0, 0.5, 0.5)
+        self._draw_3d_circle(ctx, inner_norm, view_size, R, cx, cy)
+
+    def _draw_3d_circle(self, ctx: cairo.Context, radius, view_size, R, cx, cy, segments=64):
+        """Draw a circle in 3D space on the XY plane."""
+        points = []
+        for i in range(segments + 1):
+            angle = (i / segments) * 2 * math.pi
+            x = radius * math.cos(angle)
+            y = radius * math.sin(angle)
+            z = 0.0
+
+            # Transform to 3D view
+            p = np.array([x, y, z]) @ R.T
+            screen_x = cx + p[0] * view_size
+            screen_y = cy - p[1] * view_size
+            points.append((screen_x, screen_y))
+
+        # Draw the circle
+        if points:
+            ctx.move_to(points[0][0], points[0][1])
+            for screen_x, screen_y in points[1:]:
+                ctx.line_to(screen_x, screen_y)
+            ctx.stroke()
+
+    def _draw_3d_dimension_line(
+        self,
+        ctx: cairo.Context,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        label: str,
+        view_size: float,
+        R: np.ndarray,
+        cx: float,
+        cy: float
+    ):
+        """Draw a dimension line in 3D space with label."""
+        # Transform endpoints to 3D view (on XY plane, z=0)
+        p1_3d = np.array([x1, y1, 0.0]) @ R.T
+        p2_3d = np.array([x2, y2, 0.0]) @ R.T
+
+        # Project to 2D screen coordinates
+        p1_screen = (cx + p1_3d[0] * view_size, cy - p1_3d[1] * view_size)
+        p2_screen = (cx + p2_3d[0] * view_size, cy - p2_3d[1] * view_size)
+
+        # Draw dimension line
+        ctx.set_source_rgba(0.5, 0.5, 0.6, 0.9)
+        ctx.set_line_width(2.0)
+        ctx.move_to(p1_screen[0], p1_screen[1])
+        ctx.line_to(p2_screen[0], p2_screen[1])
+        ctx.stroke()
+
+        # Draw arrow at endpoint
+        arrow_size = 8.0
+        angle = math.atan2(p2_screen[1] - p1_screen[1], p2_screen[0] - p1_screen[0])
+
+        ctx.save()
+        ctx.translate(p2_screen[0], p2_screen[1])
+        ctx.rotate(angle)
+        ctx.move_to(0, 0)
+        ctx.line_to(-arrow_size, -arrow_size / 2)
+        ctx.line_to(-arrow_size, arrow_size / 2)
+        ctx.close_path()
+        ctx.set_source_rgba(0.5, 0.5, 0.6, 0.9)
+        ctx.fill()
+        ctx.restore()
+
+        # Draw label at midpoint
+        mid_x = (p1_screen[0] + p2_screen[0]) / 2
+        mid_y = (p1_screen[1] + p2_screen[1]) / 2
+
+        # Offset label perpendicular to line
+        offset = 15
+        label_x = mid_x + offset * math.cos(angle + math.pi / 2)
+        label_y = mid_y + offset * math.sin(angle + math.pi / 2)
+
+        ctx.set_font_size(12)
+        ctx.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+        extents = ctx.text_extents(label)
+
+        # Draw label background
+        padding = 4
+        ctx.set_source_rgba(0.1, 0.1, 0.1, 0.85)
+        ctx.rectangle(
+            label_x - extents.width / 2 - padding,
+            label_y - extents.height / 2 - padding,
+            extents.width + 2 * padding,
+            extents.height + 2 * padding,
+        )
+        ctx.fill()
+
+        # Draw label text
+        ctx.set_source_rgba(1.0, 1.0, 1.0, 1.0)
+        ctx.move_to(label_x - extents.width / 2, label_y + extents.height / 2)
+        ctx.show_text(label)
 
     def _draw_debug_boxes(self, ctx: cairo.Context, width, height, view_size, R, cx, cy):
         """Draw debug visualization boxes for number sectors."""

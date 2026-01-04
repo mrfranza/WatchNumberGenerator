@@ -8,7 +8,10 @@ gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, GLib
 from typing import Optional
 from ui.preview_2d import Preview2DWidget
+from ui.export_dialog import ExportDialog
 from core.mesh_generator import MeshGenerator
+from core.unified_mesh_pipeline import UnifiedMeshPipeline
+from utils.geometry import calculate_number_positions, get_clock_numbers
 
 # Use Cairo-based 3D viewer (OpenGL in GTK4 requires modern shader-based approach)
 from ui.preview_3d import Preview3DWidget
@@ -20,9 +23,11 @@ class WatchNumberGeneratorWindow(Adw.ApplicationWindow):
     def __init__(self, application: Adw.Application):
         super().__init__(application=application)
 
-        # Mesh generator
-        self.mesh_generator = MeshGenerator()
+        # Mesh generation pipeline (unified for 2D/3D)
+        self.mesh_pipeline = UnifiedMeshPipeline()
+        self.mesh_generator = MeshGenerator()  # Keep for legacy compatibility
         self.generated_mesh = None
+        self.generated_numbers_data = None  # Store number data with mesh
 
         # Window properties
         self.set_title("Watch Number Generator")
@@ -83,9 +88,10 @@ class WatchNumberGeneratorWindow(Adw.ApplicationWindow):
         mesh_group = self._create_mesh_parameters_group()
         controls_box.append(mesh_group)
 
-        # Distortion filters group
-        distortion_group = self._create_distortion_group()
-        controls_box.append(distortion_group)
+        # Distortion filters group - DISABLED for refactoring
+        # TODO: Re-implement with better preset-based approach
+        # distortion_group = self._create_distortion_group()
+        # controls_box.append(distortion_group)
 
         # Action buttons
         buttons_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -378,16 +384,17 @@ class WatchNumberGeneratorWindow(Adw.ApplicationWindow):
         """Handle mesh parameter changes."""
         self._update_preview()
 
-    def _on_distortion_toggled(self, widget, param):
-        """Handle distortion enable/disable."""
-        enabled = widget.get_active()
-        self.distortion_params_box.set_sensitive(enabled)
-        self._update_preview()
+    # Distortion handlers DISABLED during refactoring
+    # def _on_distortion_toggled(self, widget, param):
+    #     """Handle distortion enable/disable."""
+    #     enabled = widget.get_active()
+    #     self.distortion_params_box.set_sensitive(enabled)
+    #     self._update_preview()
 
-    def _on_distortion_changed(self, widget):
-        """Handle distortion parameter changes."""
-        if self.distortion_enable_row.get_active():
-            self._update_preview()
+    # def _on_distortion_changed(self, widget):
+    #     """Handle distortion parameter changes."""
+    #     if self.distortion_enable_row.get_active():
+    #         self._update_preview()
 
     def _on_generate_mesh_clicked(self, widget):
         """Handle Generate 3D Mesh button click."""
@@ -399,26 +406,36 @@ class WatchNumberGeneratorWindow(Adw.ApplicationWindow):
         GLib.timeout_add(100, self._complete_mesh_generation)
 
     def _complete_mesh_generation(self):
-        """Complete mesh generation and enable export."""
+        """Complete mesh generation and enable export using UnifiedMeshPipeline."""
         try:
-            # Get mesh data from 2D preview (with distortions applied)
-            numbers_data = self.preview_2d_widget.generate_mesh_data()
+            # Get current parameters
+            params = self.get_parameters()
 
-            if not numbers_data:
-                self.show_toast("Error: No numbers to generate mesh from")
+            # Calculate number positions (same as 2D preview)
+            number_style = "roman" if params["number_system"] == 1 else "decimal"
+            number_set = "cardinals" if params["number_set"] == 1 else "all"
+            numbers = get_clock_numbers(number_style, number_set)
+
+            positions = calculate_number_positions(
+                params["outer_radius"],
+                params["inner_radius"],
+                params["vertical_margin"],
+                params["horizontal_margin"],
+                numbers,
+            )
+
+            if not positions:
+                self.show_toast("Error: Could not calculate number positions")
                 self.generate_mesh_button.set_label("Generate 3D Mesh")
                 self.generate_mesh_button.set_sensitive(True)
                 return False
 
-            # Get extrusion depth
-            params = self.get_parameters()
-            extrusion_depth = params["extrusion_depth"]
-
-            # Generate 3D mesh using MeshGenerator
-            print(f"Generating mesh for {len(numbers_data)} numbers with depth {extrusion_depth}mm")
-            self.generated_mesh = self.mesh_generator.create_numbers_mesh(
-                numbers_data,
-                extrusion_depth
+            # Use UnifiedMeshPipeline for consistent 2D/3D generation
+            print(f"Generating mesh for {len(positions)} numbers with depth {params['extrusion_depth']}mm")
+            self.generated_mesh, self.generated_numbers_data = self.mesh_pipeline.generate_positioned_numbers(
+                positions=positions,
+                font_desc=params["font"],
+                extrusion_depth=params["extrusion_depth"],
             )
 
             # Get mesh stats
@@ -435,10 +452,11 @@ class WatchNumberGeneratorWindow(Adw.ApplicationWindow):
                 "generated": True,
                 "timestamp": GLib.DateTime.new_now_local().format("%H:%M:%S"),
                 "mesh": self.generated_mesh,
-                "numbers_count": len(numbers_data),
+                "numbers_count": len(self.generated_numbers_data),
                 "dimensions": dimensions,
                 "triangles": len(self.generated_mesh.vectors),
-                "numbers_data": numbers_data  # For debug visualizations
+                "numbers_data": self.generated_numbers_data,  # Metadata with positions
+                "parameters": params  # Include parameters for dimension lines
             }
             self.preview_3d_widget.set_mesh(mesh_data)
 
@@ -452,7 +470,7 @@ class WatchNumberGeneratorWindow(Adw.ApplicationWindow):
             preview_3d_page = self.tab_view.get_nth_page(1)
             self.tab_view.set_selected_page(preview_3d_page)
 
-            self.show_toast(f"3D mesh generated! {len(numbers_data)} numbers, {len(self.generated_mesh.vectors)} triangles")
+            self.show_toast(f"3D mesh generated! {len(self.generated_numbers_data)} numbers, {len(self.generated_mesh.vectors)} triangles")
 
         except Exception as e:
             print(f"Error generating mesh: {e}")
@@ -466,8 +484,142 @@ class WatchNumberGeneratorWindow(Adw.ApplicationWindow):
 
     def _on_export_clicked(self, widget):
         """Handle export button click - show export dialog."""
-        # TODO: Create and show export dialog with options
-        self.show_toast("Export dialog coming soon!")
+        if not hasattr(self, 'generated_mesh') or self.generated_mesh is None:
+            self.show_toast("Please generate a mesh first")
+            return
+
+        # Create mesh data for export dialog
+        mesh_data = {
+            "mesh": self.generated_mesh,
+            "numbers_count": len(self.generated_numbers_data) if hasattr(self, 'generated_numbers_data') else 0,
+            "triangles": len(self.generated_mesh.vectors),
+            "dimensions": self.mesh_generator.get_mesh_dimensions(self.generated_mesh),
+            "numbers_data": self.generated_numbers_data if hasattr(self, 'generated_numbers_data') else [],
+            "parameters": self.get_parameters()
+        }
+
+        # Create and show export dialog
+        dialog = ExportDialog(self, mesh_data)
+        dialog.connect("export-requested", self._on_export_requested)
+        dialog.present(self)
+
+    def _on_export_requested(self, dialog, options):
+        """Handle export request from dialog."""
+        import os
+        from pathlib import Path
+
+        try:
+            folder = Path(options["folder"])
+            base_name = options["base_filename"]
+
+            # Create export folder if it doesn't exist
+            folder.mkdir(parents=True, exist_ok=True)
+
+            exported_files = []
+
+            # Export based on selected format
+            if options["format_individual"] or options["format_both"]:
+                # Export individual STL files
+                self._export_individual_stl(folder, base_name, exported_files)
+
+            if options["format_combined"] or options["format_both"]:
+                # Export combined STL file
+                self._export_combined_stl(folder, base_name, exported_files)
+
+            # Export OBJ if requested
+            if options["include_obj"]:
+                if options["format_combined"] or options["format_both"]:
+                    self._export_combined_obj(folder, base_name, exported_files)
+                if options["format_individual"] or options["format_both"]:
+                    self._export_individual_obj(folder, base_name, exported_files)
+
+            # Export PNG preview if requested
+            if options["include_png"]:
+                self._export_preview_png(folder, base_name, exported_files)
+
+            # Export README if requested
+            if options["include_readme"]:
+                self._export_readme(folder, base_name, exported_files)
+
+            # Show success message
+            file_list = "\n".join([f"  • {f}" for f in exported_files])
+            self.show_toast(f"Exported {len(exported_files)} files successfully!")
+            print(f"Export successful! Files created:\n{file_list}")
+
+        except Exception as e:
+            self.show_toast(f"Export failed: {str(e)}")
+            print(f"Export error: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def _export_combined_stl(self, folder, base_name, exported_files):
+        """Export combined STL file."""
+        filename = folder / f"{base_name}_combined.stl"
+        self.generated_mesh.save(str(filename))
+        exported_files.append(filename.name)
+
+    def _export_individual_stl(self, folder, base_name, exported_files):
+        """Export individual STL files for each number."""
+        # TODO: Split mesh by number and export individually
+        # For now, just show a placeholder message
+        print("Individual STL export not yet implemented")
+        self.show_toast("Individual STL export coming soon!")
+
+    def _export_combined_obj(self, folder, base_name, exported_files):
+        """Export combined OBJ file."""
+        # TODO: Implement OBJ export
+        print("OBJ export not yet implemented")
+
+    def _export_individual_obj(self, folder, base_name, exported_files):
+        """Export individual OBJ files."""
+        # TODO: Implement individual OBJ export
+        print("Individual OBJ export not yet implemented")
+
+    def _export_preview_png(self, folder, base_name, exported_files):
+        """Export 2D preview as PNG."""
+        # TODO: Implement PNG export from preview_2d
+        print("PNG export not yet implemented")
+
+    def _export_readme(self, folder, base_name, exported_files):
+        """Export README with parameters."""
+        import datetime
+
+        params = self.get_parameters()
+        readme_path = folder / f"{base_name}_README.txt"
+
+        readme_content = f"""Watch Dial Numbers - Export Information
+Generated: {datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+
+MESH PARAMETERS:
+- Outer Radius: {params['outer_radius']:.1f} mm
+- Inner Radius: {params['inner_radius']:.1f} mm
+- Extrusion Depth: {params['extrusion_depth']:.1f} mm
+- Vertical Margin: {params['vertical_margin']:.1f} mm
+- Horizontal Margin: {params['horizontal_margin']:.1f} mm
+
+DESIGN:
+- Number System: {"Roman" if params['number_system'] == 1 else "Decimal"}
+- Number Set: {"Cardinals only (12, 3, 6, 9)" if params['number_set'] == 1 else "All numbers"}
+- Font: {params['font']}
+
+MESH STATISTICS:
+- Numbers: {len(self.generated_numbers_data) if hasattr(self, 'generated_numbers_data') else 0}
+- Triangles: {len(self.generated_mesh.vectors)}
+- Dimensions: {self.mesh_generator.get_mesh_dimensions(self.generated_mesh)[0]:.1f} × {self.mesh_generator.get_mesh_dimensions(self.generated_mesh)[1]:.1f} × {self.mesh_generator.get_mesh_dimensions(self.generated_mesh)[2]:.1f} mm
+
+PRINTING RECOMMENDATIONS:
+- Layer Height: 0.1-0.2 mm
+- Supports: Not required (numbers are flat on build plate)
+- Orientation: Place flat on build plate for best detail
+- Material: PLA, PETG, or Resin recommended
+
+Generated with Watch Number Generator
+"""
+
+        with open(readme_path, 'w') as f:
+            f.write(readme_content)
+
+        exported_files.append(readme_path.name)
 
     def _update_preview(self):
         """Update the preview display."""
@@ -487,10 +639,7 @@ class WatchNumberGeneratorWindow(Adw.ApplicationWindow):
             number_style=number_style,
             number_set=number_set,
             font_desc=params["font"],
-            edge_irregularity=params["edge_irregularity"],
-            surface_roughness=params["surface_roughness"],
-            perspective_stretch=params["perspective_stretch"],
-            erosion=params["erosion"],
+            # Distortion parameters removed during refactoring
         )
 
     def show_toast(self, message: str):
@@ -510,10 +659,6 @@ class WatchNumberGeneratorWindow(Adw.ApplicationWindow):
             "extrusion_depth": self.depth_row.get_value(),
             "vertical_margin": self.vmargin_row.get_value(),
             "horizontal_margin": self.hmargin_row.get_value(),
-            "distortion_enabled": self.distortion_enable_row.get_active(),
-            "edge_irregularity": self.edge_irregularity_scale.get_value(),
-            "surface_roughness": self.surface_roughness_scale.get_value(),
-            "perspective_stretch": self.perspective_scale.get_value(),
-            "erosion": self.erosion_scale.get_value(),
-            "random_seed": int(self.seed_row.get_value()),
+            # Distortion parameters removed during refactoring
+            # TODO: Re-add with preset-based approach
         }
